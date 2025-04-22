@@ -88,3 +88,11 @@ cd PriceChecker\backend
 python -m uvicorn main:app --reload
 
 如果需要 duckdb 的 parquet 文件，可以运行 @preprocess_parquet.py
+
+**新增birdeye 百分比栏位**
+
+功能
+在前端 PriceTable.js 组件中，已在“Birdeye价格”列右侧新增“Birdeye百分比差异”列。
+该列百分比由前端计算，比较 buy_price_usd 或 sell_price_usd 与 birdeye_price 的百分比差异，仅保留两位小数，不做hover展示。
+若任一数据为 null、空、- 或无效，直接显示“-”。
+百分比为正数时显示绿色，为负数时显示红色，零为默认色，符合最佳实践。
