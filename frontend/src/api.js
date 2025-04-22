@@ -43,13 +43,98 @@ export const fetchFilterData = async ({ priceType, priceUnit, solPrice, token, p
   return res.data;
 };
 
-export const fetchBatchBinsData = async ({ priceType, bins, page = 1, pageSize = 20 }) => {
+// 新增支持多模式批量bins分页数据加载
+export const fetchBatchBinsData = async (paramsObj) => {
+  console.debug('[DEBUG] fetchBatchBinsData called with:', JSON.stringify(paramsObj, null, 2));
+  const { priceType, priceUnit, solPrice, bins, page, pageSize, pageStart, pageEnd, mode } = paramsObj;
+  
+  // 检查参数详细信息
+  console.debug('[DEBUG] Parameter details:', {
+    priceType,
+    priceUnit,
+    solPrice,
+    bins,
+    pageSize,
+    page: page || 'undefined',
+    pageStart: pageStart || 'undefined',
+    pageEnd: pageEnd || 'undefined',
+    mode: mode || 'undefined',
+    hasPage: !!page,
+    hasPageRange: !!(pageStart && pageEnd),
+    hasMode: !!mode
+  });
+  
+  // 检查必须参数
+  if (!priceType || !priceUnit || !solPrice || !bins || !bins.length || !pageSize) {
+    console.error('[ERROR] Missing required parameters:', { priceType, priceUnit, solPrice, bins, pageSize });
+    throw new Error('fetchBatchBinsData 缺少必须的参数');
+  }
+  
+  // 安全地解析数字参数，确保转换为有效的数字
+  const safeParseInt = (val) => {
+    if (val === undefined || val === null) return null;
+    const num = Number(val);
+    return !isNaN(num) && Number.isFinite(num) ? num : null;
+  };
+  
+  const parsedPage = safeParseInt(page);
+  const parsedPageStart = safeParseInt(pageStart);
+  const parsedPageEnd = safeParseInt(pageEnd);
+  
+  // 创建参数对象
   const params = {
     price_type: priceType,
+    price_unit: priceUnit,
+    sol_price: solPrice,
     bins: bins.join(','),
-    page,
     page_size: pageSize
   };
-  const res = await axios.get(`${API_BASE}/batch_bins_data`, { params });
-  return res.data;
+  
+  // 检测请求模式并设置参数
+  let requestMode = '';
+  
+  if (mode) {
+    params.mode = mode;
+    requestMode = 'mode';
+  }
+  
+  if (parsedPageStart !== null && parsedPageEnd !== null) {
+    params.page_start = parsedPageStart;
+    params.page_end = parsedPageEnd;
+    requestMode = 'page_range';
+  } else if (parsedPage !== null) {
+    params.page = parsedPage;
+    requestMode = 'single_page';
+  }
+  
+  // 修改验证逻辑：只要有一个有效的模式即可
+  if (!requestMode) {
+    console.error('[ERROR] No valid request mode specified, received:', {
+      page,
+      pageStart,
+      pageEnd,
+      mode,
+      parsedPage,
+      parsedPageStart,
+      parsedPageEnd
+    });
+    throw new Error('fetchBatchBinsData 缺少有效的模式参数（mode/page/pageStart+pageEnd）');
+  }
+  
+  console.debug(`[DEBUG] Sending batch request in ${requestMode} mode with params:`, params);
+  
+  try {
+    const res = await axios.get(`${API_BASE}/batch_bins_data`, { params });
+    console.debug('[DEBUG] Batch data response:', { mode: requestMode, binsRequested: bins, binsReturned: Object.keys(res.data) });
+    return res.data;
+  } catch (error) {
+    console.error('[ERROR] fetchBatchBinsData failed:', error);
+    throw error;
+  }
+};
+
+export const fetchBirdeyePrices = async (trades) => {
+  // trades: [{token_mint_address, trade_time}]
+  const res = await axios.post(`${API_BASE}/birdeye_prices`, trades);
+  return res.data.prices;
 };

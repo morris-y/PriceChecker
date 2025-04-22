@@ -10,6 +10,7 @@ import logging
 from fastapi.responses import JSONResponse
 from fastapi import Request
 import datetime
+from birdeye_api import batch_birdeye_prices
 
 # 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -463,44 +464,128 @@ def batch_bins_data(
     price_unit: str = Query("USD", regex="^(SOL|USD)$"),
     sol_price: float = Query(133, gt=0),
     bins: str = Query("3,4,5"),
-    page: int = Query(1, gt=0),
+    page: Optional[int] = Query(None, gt=0),
     page_size: int = Query(20, gt=0, le=200),
-    return_detail: bool = Query(True)  # 預設回傳明細
+    page_start: Optional[int] = Query(None, gt=0),
+    page_end: Optional[int] = Query(None, gt=0),
+    mode: Optional[str] = Query(None),
+    return_detail: bool = Query(True)
 ):
+    """
+    多模式 batch_bins_data：
+    - mode=init: 返回所有 bins 的第一页
+    - page_start/page_end: 返回某 bin 的多页（如1-5页）
+    - page: 返回某 bin 的单页
+    支持 bins=2,3,4,5,1,0
+    """
     try:
         bins_idx = [int(x) for x in bins.split(",") if x.strip().isdigit()]
         bins_edges = [0, 10, 100, 1000, 10000, 100000, 1e20]
         result = {}
-        for idx in bins_idx:
-            # 查詢明細
-            data, total = query_and_enrich(
-                price_type=price_type,
-                price_unit=price_unit,
-                sol_price=sol_price,
-                price_bin=idx,
-                bins=bins_edges,
-                page=page,
-                page_size=page_size,
-                return_detail=return_detail
-            )
-            # 查詢統計
+        # 模式A：mode=init，所有 bins 的第一页
+        if mode == 'init':
+            for idx in bins_idx:
+                data, total = query_and_enrich(
+                    price_type=price_type,
+                    price_unit=price_unit,
+                    sol_price=sol_price,
+                    price_bin=idx,
+                    bins=bins_edges,
+                    page=1,
+                    page_size=page_size,
+                    return_detail=return_detail
+                )
+                summary, _ = query_and_enrich(
+                    price_type=price_type,
+                    price_unit=price_unit,
+                    sol_price=sol_price,
+                    price_bin=idx,
+                    bins=bins_edges,
+                    page=1,
+                    page_size=1000000,
+                    return_detail=False
+                )
+                json_high = None if idx+1 == len(bins_edges)-1 else float(bins_edges[idx+1])
+                json_low = float(bins_edges[idx])
+                result[idx] = {'pages': {1: data}, 'total': total, 'low': json_low, 'high': json_high, 'summary': summary}
+            return result
+        # 模式B：批量多页
+        elif page_start and page_end:
+            idx = bins_idx[0]  # 只支持单bin批量多页
+            pages = {}
+            total = 0
+            # 修复：对每一页单独查询数据，确保每页正确的记录数
+            for p in range(page_start, page_end+1):
+                # 确保每页使用正确的page参数，并指定正确的page_size
+                data, t = query_and_enrich(
+                    price_type=price_type,
+                    price_unit=price_unit,
+                    sol_price=sol_price,
+                    price_bin=idx,
+                    bins=bins_edges,
+                    page=p,  # 关键修复：确保每页使用正确的页码
+                    page_size=page_size,  # 使用指定的page_size
+                    return_detail=return_detail
+                )
+                # 记录该页的数据，每页应有page_size条（除非最后一页可能少于page_size）
+                pages[p] = data
+                total = t  # 保留总记录数
             summary, _ = query_and_enrich(
                 price_type=price_type,
                 price_unit=price_unit,
                 sol_price=sol_price,
                 price_bin=idx,
                 bins=bins_edges,
-                page=page,
-                page_size=page_size,
+                page=1,
+                page_size=1000000,
                 return_detail=False
             )
             json_high = None if idx+1 == len(bins_edges)-1 else float(bins_edges[idx+1])
             json_low = float(bins_edges[idx])
-            if return_detail:
-                result[idx] = {'data': data, 'total': total, 'low': json_low, 'high': json_high, 'page': page, 'page_size': page_size, 'summary': summary}
-            else:
-                result[idx] = {**data, 'low': json_low, 'high': json_high, 'summary': summary}
-        return result
+            result[idx] = {'pages': pages, 'total': total, 'low': json_low, 'high': json_high, 'summary': summary}
+            return result
+        # 模式C：单页
+        elif page:
+            for idx in bins_idx:
+                data, total = query_and_enrich(
+                    price_type=price_type,
+                    price_unit=price_unit,
+                    sol_price=sol_price,
+                    price_bin=idx,
+                    bins=bins_edges,
+                    page=page,
+                    page_size=page_size,
+                    return_detail=return_detail
+                )
+                summary, _ = query_and_enrich(
+                    price_type=price_type,
+                    price_unit=price_unit,
+                    sol_price=sol_price,
+                    price_bin=idx,
+                    bins=bins_edges,
+                    page=1,
+                    page_size=1000000,
+                    return_detail=False
+                )
+                json_high = None if idx+1 == len(bins_edges)-1 else float(bins_edges[idx+1])
+                json_low = float(bins_edges[idx])
+                result[idx] = {'pages': {page: data}, 'total': total, 'low': json_low, 'high': json_high, 'summary': summary}
+            return result
+        else:
+            return {"error": "参数不合法，需指定 mode=init 或 page_start/page_end 或 page"}
     except Exception as e:
         logger.error(f"/api/batch_bins_data error: {e}", exc_info=True)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.post("/api/birdeye_prices")
+def birdeye_prices(trades: List[dict]):
+    """
+    批量获取Birdeye价格。trades为包含'token_mint_address'和'trade_time'的dict列表。
+    返回每笔交易的价格（若无则为'-'）。
+    """
+    try:
+        prices = batch_birdeye_prices(trades)
+        return {"prices": prices}
+    except Exception as e:
+        logger.error(f"/api/birdeye_prices error: {e}", exc_info=True)
         return JSONResponse(content={"error": str(e)}, status_code=500)

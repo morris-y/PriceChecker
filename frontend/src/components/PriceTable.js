@@ -1,18 +1,18 @@
 import React from "react";
 import { Table, Tooltip, Descriptions } from "antd";
 
-function formatNumber(val, digits = 6) {
+function formatNumber(val, digits = 8) {
   if (val === undefined || val === null || val === "") return "-";
   const num = Number(val);
   if (isNaN(num)) return val;
-  let safeDigits = 6;
+  let safeDigits = 8;
   if (typeof digits === 'number' && isFinite(digits)) {
     safeDigits = Math.max(0, Math.min(20, Math.floor(digits)));
   }
   return num.toLocaleString(undefined, { maximumFractionDigits: safeDigits });
 }
 
-const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pagination, summary }) => {
+const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pagination, summary, priceType }) => {
   const columns = [
     {
       title: "Solscan",
@@ -67,11 +67,28 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
       dataIndex: priceUnit === 'USD' ? 'buy_price_usd' : 'buy_price',
       key: "buy_price",
       align: 'right',
-      render: (text, record) => (
-        <Tooltip title={`USD: ${formatNumber(record.buy_price_usd)} (SOL/USD)`}>
-          {formatNumber(priceUnit === 'USD' ? record.buy_price_usd : record.buy_price)}
-        </Tooltip>
-      ),
+      render: (text, record) => {
+        const usd = record.buy_price_usd;
+        const sol = record.buy_price;
+        let mainVal, hoverVal, hoverUnit;
+        if (priceUnit === 'USD') {
+          mainVal = usd;
+          hoverVal = sol;
+          hoverUnit = 'SOL';
+        } else {
+          mainVal = sol;
+          hoverVal = usd;
+          hoverUnit = 'USD';
+        }
+        const strMain = mainVal === undefined || mainVal === null || mainVal === '' ? '-' : String(mainVal);
+        const strHover = hoverVal === undefined || hoverVal === null || hoverVal === '' ? '-' : String(hoverVal);
+        const shortVal = formatNumber(mainVal, 8);
+        return (
+          <Tooltip title={strHover !== '-' ? `${hoverUnit}: ${strHover}` : '-'}>
+            <span>{shortVal}</span>
+          </Tooltip>
+        );
+      },
       sorter: (a, b) => Number((priceUnit === 'USD' ? a.buy_price_usd : a.buy_price) || 0) - Number((priceUnit === 'USD' ? b.buy_price_usd : b.buy_price) || 0),
     },
     {
@@ -95,11 +112,28 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
       dataIndex: priceUnit === 'USD' ? 'sell_price_usd' : 'sell_price',
       key: "sell_price",
       align: 'right',
-      render: (text, record) => (
-        <Tooltip title={`USD: ${formatNumber(record.sell_price_usd)} (SOL/USD)`}>
-          {formatNumber(priceUnit === 'USD' ? record.sell_price_usd : record.sell_price)}
-        </Tooltip>
-      ),
+      render: (text, record) => {
+        const usd = record.sell_price_usd;
+        const sol = record.sell_price;
+        let mainVal, hoverVal, hoverUnit;
+        if (priceUnit === 'USD') {
+          mainVal = usd;
+          hoverVal = sol;
+          hoverUnit = 'SOL';
+        } else {
+          mainVal = sol;
+          hoverVal = usd;
+          hoverUnit = 'USD';
+        }
+        const strMain = mainVal === undefined || mainVal === null || mainVal === '' ? '-' : String(mainVal);
+        const strHover = hoverVal === undefined || hoverVal === null || hoverVal === '' ? '-' : String(hoverVal);
+        const shortVal = formatNumber(mainVal, 8);
+        return (
+          <Tooltip title={strHover !== '-' ? `${hoverUnit}: ${strHover}` : '-'}>
+            <span>{shortVal}</span>
+          </Tooltip>
+        );
+      },
       sorter: (a, b) => Number((priceUnit === 'USD' ? a.sell_price_usd : a.sell_price) || 0) - Number((priceUnit === 'USD' ? b.sell_price_usd : b.sell_price) || 0),
     },
     {
@@ -127,6 +161,43 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
       sorter: (a, b) => Number(a.arbitrage_volume) - Number(b.arbitrage_volume),
     },
   ];
+
+  // 动态插入 Birdeye 价格列
+  if (columns.every(col => col.key !== 'birdeye_price')) {
+    columns.push({
+      title: 'Birdeye价格',
+      dataIndex: 'birdeye_price',
+      key: 'birdeye_price',
+      align: 'right',
+      render: (val) => val === undefined || val === null || val === '' ? '-' : val,
+    });
+  }
+
+  // 新增 Birdeye 百分比差异列，紧跟在 Birdeye价格 右侧
+  if (columns.every(col => col.key !== 'birdeye_percent_diff')) {
+    columns.push({
+      title: '百分比差异',
+      key: 'birdeye_percent_diff',
+      align: 'right',
+      render: (text, record) => {
+        const birdeye = record.birdeye_price;
+        const price = record.buy_price_usd; // 只用买入价格
+        if (
+          birdeye === undefined || birdeye === null || birdeye === '' || birdeye === '-' ||
+          price === undefined || price === null || price === '' || price === '-'
+        ) {
+          return '-';
+        }
+        const numBirdeye = Number(birdeye);
+        const numPrice = Number(price);
+        if (isNaN(numBirdeye) || isNaN(numPrice) || numBirdeye === 0) return '-';
+        const diff = ((numPrice - numBirdeye) / numBirdeye) * 100;
+        const diffStr = diff > 0 ? `+${diff.toFixed(2)}%` : `${diff.toFixed(2)}%`;
+        // 最佳实践：正负色彩区分
+        return <span style={{color: diff > 0 ? '#3f8600' : diff < 0 ? '#cf1322' : undefined}}>{diffStr}</span>;
+      },
+    });
+  }
 
   const enhancedData = (Array.isArray(data) ? data : []).map(row => ({
     ...row,

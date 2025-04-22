@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Layout, InputNumber, Button, Row, Col, Typography, message, Select, Spin, Tabs } from "antd";
 import PriceTable from "./components/PriceTable";
 import AbnormalFilterButton from "./components/AbnormalFilterButton";
-import { fetchRandomSample, fetchTopTokens, fetchBatchBinsData, fetchFilterData } from "./api";
+import { fetchRandomSample, fetchTopTokens, fetchBatchBinsData, fetchFilterData, fetchBirdeyePrices } from "./api";
 
 const { Header, Content } = Layout;
 const { Title } = Typography;
@@ -30,15 +30,20 @@ function App() {
   const [samplePage, setSamplePage] = useState(1);
   const [samplePageSize, setSamplePageSize] = useState(20);
   const [abnormalMode, setAbnormalMode] = useState(false); // 新增异常模式
+  const [birdeyeLoading, setBirdeyeLoading] = useState(false);
+  const [birdeyeStatus, setBirdeyeStatus] = useState(null); // 'loading' | 'success' | 'error'
+
+  // 控件尺寸（用于 antd 组件）
+  const controlSize = "middle";
 
   // 区间tab相关
-  const binIdxList = [4, 3, 2, 5, 1, 0]; // 保證 tab 與預加載順序均以 100-1K USD (bin 4) 為第一順位
-  const [activeBin, setActiveBin] = useState(4); // 預設 activeBin 也為 4
-  const [binData, setBinData] = useState({}); // {binIdx: {data, total}}
+  const binIdxList = [2, 3, 4, 5, 1, 0]; // 调整顺序为 2,3,4,5,1,0
+  const [activeBin, setActiveBin] = useState(2); // 默认展示 bins=2
+  const [binData, setBinData] = useState({}); // {binIdx: {pages: {pageNum: data[]}, total, summary, loadedPageRange}}
   const [binLoading, setBinLoading] = useState(false);
 
   useEffect(() => {
-    setActiveBin(4); // 保證初次渲染時tab正確
+    setActiveBin(2); // 保证初次渲染时tab正确
   }, []);
 
   useEffect(() => {
@@ -65,7 +70,7 @@ function App() {
     }
   }, [data, selectedToken, mode]);
 
-  // 价格区间详细文案
+  // 价格区间详细文案（USD为锚点，bins区间始终以USD为主）
   const binLabels = [
     "0-10 USD",
     "10-100 USD",
@@ -84,18 +89,224 @@ function App() {
   }, []);
 
   useEffect(() => {
+    console.debug('[DEBUG] 初始化请求所有区间第一页数据');
     setBinLoading(true);
-    fetchBatchBinsData({ priceType, priceUnit, solPrice, bins: binIdxList, page: 1, pageSize })
-      .then(res => setBinData(res))
-      .finally(() => setBinLoading(false));
-  }, [priceType, priceUnit, solPrice, pageSize]);
+    
+    // 初始化请求：仅请求所有区间的第一页数据
+    fetchBatchBinsData({
+      priceType, 
+      priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+      solPrice,
+      bins: binIdxList,  // 所有区间
+      pageSize: pageSize || 20,
+      mode: 'init'
+    })
+      .then(res => {
+        console.debug('[DEBUG] 初始化加载成功:', Object.keys(res));
+        // 统一缓存结构
+        const newBinData = {};
+        for (const idx of binIdxList) {
+          if (res[idx]) {
+            newBinData[idx] = {
+              pages: { 1: res[idx].pages[1] || [] },
+              total: res[idx].total,
+              summary: res[idx].summary,
+              loadedPageRange: [[1,1]] // 仅记录第一页已加载
+            };
+          }
+        }
+        setBinData(newBinData);
+        
+        // 检查是否有当前激活区间的第一页数据
+        const hasActiveFirstPage = newBinData[activeBin] && newBinData[activeBin].pages && newBinData[activeBin].pages[1];
+        
+        if (hasActiveFirstPage) {
+          // 只要获取到第一个区间的第一页数据，就允许用户交互（不等待所有区间数据）
+          console.debug(`[DEBUG] 已获取当前区间${activeBin}第一页数据，解除加载状态`); 
+          setBinLoading(false);
+          
+          // 后台异步加载当前激活区间的第2-5页
+          console.debug(`[DEBUG] 后台异步加载当前区间${activeBin}的2-5页数据`);
+          loadCurrentBinPages(activeBin, 2, 5);
+        } else {
+          console.warn(`[WARN] 返回数据中没有当前区间${activeBin}的第一页`);
+          message.error(`无法获取价格区间${activeBin}的数据`);
+          setBinLoading(false);
+        }
+      })
+      .catch(err => {
+        console.error('[ERROR] 初始化数据加载失败:', err);
+        message.error('初始数据加载失败');
+        setBinLoading(false);
+      });
+  }, []); // 移除eslint禁用注释，使用空依赖数组确保只在组件挂载时执行一次
+
+  const loadCurrentBinPages = (binIdx, startPage, endPage) => {
+    // 检查是否已缓存该区间的页面范围
+    const loaded = binData[binIdx]?.loadedPageRange || [];
+    const isRangeCached = loaded.some(([s, e]) => s <= startPage && e >= endPage);
+    
+    if (isRangeCached) {
+      console.debug(`[DEBUG] 区间${binIdx}的${startPage}-${endPage}页已缓存，无需请求`);
+      return;
+    }
+    
+    // 确保所有参数都是有效的数字类型
+    const currentPageSize = Number(pageSize || 20);
+    const binIdxNumber = Number(binIdx);
+    const startPageNumber = Number(startPage);
+    const endPageNumber = Number(endPage);
+    
+    console.debug(`[DEBUG] 后台加载区间${binIdxNumber}的${startPageNumber}-${endPageNumber}页数据，pageSize=${currentPageSize}`, {
+      binIdx: binIdxNumber,
+      startPage: startPageNumber,
+      endPage: endPageNumber,
+      pageSize: currentPageSize,
+      paramTypes: {
+        binIdx: typeof binIdxNumber,
+        startPage: typeof startPageNumber,
+        endPage: typeof endPageNumber,
+        pageSize: typeof currentPageSize
+      }
+    });
+    
+    // 后台异步加载该区间的指定页码范围
+    fetchBatchBinsData({
+      priceType, 
+      priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+      solPrice,
+      bins: [binIdxNumber],
+      pageSize: currentPageSize,
+      pageStart: startPageNumber,
+      pageEnd: endPageNumber
+      // 注意：不需要额外的mode参数，api.js已经修复了验证逻辑
+    })
+      .then(res => {
+        if (res[binIdxNumber] && res[binIdxNumber].pages) {
+          console.debug(`[DEBUG] 区间${binIdxNumber}的${startPageNumber}-${endPageNumber}页加载成功`);
+          setBinData(prev => {
+            const prevPages = prev[binIdxNumber]?.pages || {};
+            const newPages = { ...prevPages, ...res[binIdxNumber].pages };
+            return {
+              ...prev,
+              [binIdxNumber]: {
+                ...prev[binIdxNumber],
+                pages: newPages,
+                total: res[binIdxNumber].total,
+                summary: res[binIdxNumber].summary,
+                loadedPageRange: mergeRanges((prev[binIdxNumber]?.loadedPageRange || []).concat([[startPageNumber, endPageNumber]]))
+              }
+            };
+          });
+        }
+      })
+      .catch(err => {
+        console.error(`[ERROR] 加载区间${binIdxNumber}的${startPageNumber}-${endPageNumber}页失败:`, err);
+      });
+  };
+
+  useEffect(() => {
+    console.debug('[DEBUG] 价格参数变化，重置数据');
+    // 清空所有缓存数据
+    setBinData({});
+    setPage(1);
+    
+    // 重新初始化所有区间第一页
+    setBinLoading(true);
+    fetchBatchBinsData({
+      priceType, 
+      priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+      solPrice,
+      bins: binIdxList,
+      pageSize: pageSize || 20,
+      mode: 'init'
+    })
+      .then(res => {
+        // 统一缓存结构
+        const newBinData = {};
+        for (const idx of binIdxList) {
+          if (res[idx]) {
+            newBinData[idx] = {
+              pages: { 1: res[idx].pages[1] || [] },
+              total: res[idx].total,
+              summary: res[idx].summary,
+              loadedPageRange: [[1,1]]
+            };
+          }
+        }
+        setBinData(newBinData);
+        
+        // 检查是否有当前激活区间的第一页数据
+        const hasActiveFirstPage = newBinData[activeBin] && newBinData[activeBin].pages && newBinData[activeBin].pages[1];
+        
+        if (hasActiveFirstPage) {
+          // 只要获取到第一个区间的第一页数据，就允许用户交互（不等待所有区间数据）
+          console.debug(`[DEBUG] 已获取当前区间${activeBin}第一页数据，解除加载状态`); 
+          setBinLoading(false);
+          
+          // 后台异步加载当前激活区间的第2-5页
+          console.debug(`[DEBUG] 后台异步加载当前区间${activeBin}的2-5页数据`);
+          loadCurrentBinPages(activeBin, 2, 5);
+        } else {
+          console.warn(`[WARN] 返回数据中没有当前区间${activeBin}的第一页`);
+          message.error(`无法获取价格区间${activeBin}的数据`);
+          setBinLoading(false);
+        }
+      })
+      .catch(err => {
+        console.error('[ERROR] 重置数据失败:', err);
+        message.error('重置数据失败');
+        setBinLoading(false);
+      });
+  }, [priceType, solPrice]);
+
+  useEffect(() => {
+    if (Object.keys(binData).length > 0) {
+      console.debug('[DEBUG] 页面大小变化，重新加载数据');
+      // 清空数据，重新初始化
+      setBinData({});
+      setPage(1);
+      
+      // 重新初始化所有区间第一页
+      setBinLoading(true);
+      fetchBatchBinsData({
+        priceType, 
+        priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+        solPrice,
+        bins: binIdxList,
+        pageSize: pageSize || 20,
+        mode: 'init'
+      })
+        .then(res => {
+          const newBinData = {};
+          for (const idx of binIdxList) {
+            if (res[idx]) {
+              newBinData[idx] = {
+                pages: { 1: res[idx].pages[1] || [] },
+                total: res[idx].total,
+                summary: res[idx].summary,
+                loadedPageRange: [[1,1]]
+              };
+            }
+          }
+          setBinData(newBinData);
+          loadCurrentBinPages(activeBin, 2, 5);
+        })
+        .catch(err => {
+          console.error('[ERROR] 页面大小变化重载数据失败:', err);
+          message.error('更新页面大小失败');
+          setBinLoading(false);
+        })
+        .finally(() => setBinLoading(false));
+    }
+  }, [pageSize]);
 
   useEffect(() => {
     if (mode !== 'sample') {
       setPage(1);
       fetchPageData({ page: 1 });
     }
-  }, [selectedToken, priceType, priceUnit, solPrice, mode]);
+  }, [selectedToken, priceType, solPrice, mode]);
 
   // 异常值过滤切换
   const handleAbnormalFilter = () => {
@@ -103,7 +314,7 @@ function App() {
       setLoading(true);
       fetchFilterData({
         priceType,
-        priceUnit,
+        priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
         solPrice,
         token: selectedToken,
         page,
@@ -140,7 +351,7 @@ function App() {
     setSamplePageSize(20);
     fetchRandomSample(rows, tokens, {
       priceType,
-      priceUnit,
+      priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
       solPrice,
       token: selectedToken,
       priceBin: activeBin // 傳遞當前tab bin index
@@ -160,96 +371,233 @@ function App() {
       .finally(() => setLoading(false));
   };
 
-  // 預加載多頁 bins 數據
-  const preloadBinPages = async (binIdx, pages = 5, pageSize = 100) => {
-    setBinLoading(true);
-    let allRows = [];
-    let total = 0;
-    for (let p = 1; p <= pages; p++) {
-      // 每頁單獨請求
-      const res = await fetchBatchBinsData({ priceType, priceUnit, solPrice, bins: [binIdx], page: p, pageSize });
-      if (res && res[binIdx]) {
-        allRows = allRows.concat(res[binIdx].data || []);
-        total = res[binIdx].total;
-      }
-    }
-    setBinData(prev => ({
-      ...prev,
-      [binIdx]: { data: allRows, total, loadedPages: new Set(Array.from({length: pages}, (_, i) => i + 1)) }
-    }));
-    setBinLoading(false);
-  };
-
+  // tab切换
   const handleTabChange = (key) => {
     const idx = Number(key);
+    console.debug(`[DEBUG] 切换到区间${idx}`);
+    
+    // 设置当前区间
     setActiveBin(idx);
-    setPage(1); // 切換tab時重置到第一頁
-    if (!binData[idx] || !binData[idx].loadedPages || binData[idx].loadedPages.size < 5) {
-      preloadBinPages(idx, 5, 100);
-    }
-    // 直接更新total为该区间的total
-    if (binData[idx] && binData[idx].total !== undefined) {
-      setTotal(binData[idx].total);
+    setPage(1); // 切换区间时始终显示第一页
+    
+    // 检查是否已缓存该区间的第一页
+    const binCache = binData[idx];
+    const loadedRanges = binCache?.loadedPageRange || [];
+    
+    // 检查是否已缓存该区间的第一页
+    if (!binCache || !binCache.pages || !binCache.pages[1]) {
+      // 缓存不存在，需要请求第一页
+      console.debug(`[DEBUG] 区间${idx}的第一页未缓存，需要请求`);
+      setBinLoading(true);
+      
+      fetchBatchBinsData({
+        priceType,
+        priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+        solPrice,
+        bins: [idx],
+        pageSize: pageSize || 20,
+        page: 1,
+        mode: 'init' // 添加明确的模式参数
+      })
+        .then(res => {
+          if (res[idx] && res[idx].pages) {
+            console.debug(`[DEBUG] 区间${idx}的第一页加载成功`);
+            setBinData(prev => ({
+              ...prev,
+              [idx]: {
+                pages: { 1: res[idx].pages[1] || [] },
+                total: res[idx].total,
+                summary: res[idx].summary,
+                loadedPageRange: [[1, 1]]
+              }
+            }));
+            
+            // 加载第一页成功后，异步加载2-5页
+            setTimeout(() => loadCurrentBinPages(idx, 2, 5), 100);
+          }
+        })
+        .catch(err => {
+          console.error(`[ERROR] 请求区间${idx}的第一页失败:`, err);
+          message.error('请求区间数据失败');
+        })
+        .finally(() => setBinLoading(false));
+    } else {
+      // 检查是否已缓存该区间的1-5页
+      const has1to5 = loadedRanges.some(([s, e]) => s <= 1 && e >= 5);
+      
+      if (!has1to5) {
+        console.debug(`[DEBUG] 区间${idx}的1-5页未缓存，需要批量加载`);
+        // 加载2-5页
+        setTimeout(() => loadCurrentBinPages(idx, 2, 5), 100);
+      } else {
+        console.debug(`[DEBUG] 区间${idx}的1-5页已缓存，无需请求`);
+      }
     }
   };
 
-  // bins分頁時如超出已加載範圍則動態加載新頁
+  // 翻页加载
   const handleTableChange = (pagination) => {
-    setPage(pagination.current);
-    setPageSize(pagination.pageSize);
-    const loadedPages = binData[activeBin]?.loadedPages || new Set();
-    const targetPage = pagination.current;
-    if (!loadedPages.has(targetPage)) {
-      // 動態加載新頁並合併
-      fetchBatchBinsData({ priceType, priceUnit, solPrice, bins: [activeBin], page: targetPage, pageSize: pagination.pageSize })
+    // 防御：数据未ready时直接跳过，避免undefined异常和无意义请求
+    if (!binData[activeBin]) {
+      console.debug('[DEBUG] 当前区间数据未准备好，跳过翻页处理');
+      return;
+    }
+    
+    const idx = activeBin;
+    let curPage;
+    let curPageSize = pageSize || 20;
+    
+    // 支持两种调用情况：
+    // 1. pagination是一个包含当前页码和页大小的对象
+    // 2. pagination直接是一个页码数字
+    if (typeof pagination === 'object' && pagination !== null) {
+      // 如果是对象，尝试从 pagination.current 获取页码
+      curPage = pagination.current;
+      if (pagination.pageSize !== undefined) {
+        curPageSize = pagination.pageSize;
+      }
+    } else if (typeof pagination === 'number') {
+      // 如果直接是数字，则使用这个数字作为页码
+      curPage = pagination;
+    } else {
+      // 如果都不是，则使用当前状态的页码或默认值
+      console.warn('[WARN] 无法从 pagination 参数获取页码，使用当前页码代替:', pagination);
+      curPage = page || 1;
+    }
+    
+    // 计算应批量加载哪5页，添加更严格的类型检查
+    const curPageNumber = Number(curPage);
+    if (isNaN(curPageNumber) || curPageNumber < 1) {
+      console.error(`[ERROR] curPage转换为有效数字失败:`, { curPage, curPageType: typeof curPage });
+      return; // 中止翻页操作
+    }
+    
+    const curPageSizeNumber = Number(curPageSize);
+    if (isNaN(curPageSizeNumber) || curPageSizeNumber < 1) {
+      console.error(`[ERROR] curPageSize转换为有效数字失败:`, { curPageSize });
+      return; // 中止翻页操作
+    }
+    
+    // 记录调试信息
+    console.debug(`[DEBUG] handleTableChange参数检查:`, {
+      pagination,
+      paginationType: typeof pagination,
+      curPage,
+      curPageNumber,
+      curPageSize,
+      curPageSizeNumber,
+      idx
+    });
+    
+    // 计算应批量加载哪5页
+    const batchStart = Math.floor((curPageNumber - 1) / 5) * 5 + 1;
+    const batchEnd = batchStart + 4;
+    
+    console.debug(`[DEBUG] 批量加载页码范围: ${batchStart}-${batchEnd}页`, {
+      batchStart,
+      batchEnd,
+      curPage: curPageNumber,
+      pageSize: curPageSizeNumber,
+      binIdx: idx
+    });
+    
+    // 检查是否已缓存该页码范围
+    const loaded = binData[idx]?.loadedPageRange || [];
+    let pageIsCached = loaded.some(([s, e]) => curPageNumber >= s && curPageNumber <= e);
+    
+    console.debug('[DEBUG] 翻页处理:', { 当前区间: idx, 当前页码: curPageNumber, 缓存页码范围: loaded, 是否已缓存: pageIsCached });
+    
+    if (pageIsCached) {
+      // 使用缓存数据
+      const cachedData = binData[idx].pages[curPageNumber];
+      console.debug(`[DEBUG] 使用缓存数据，当前页码${curPageNumber}共${cachedData.length}条记录`);
+    } else {
+      // 批量加载该页码范围
+      setBinLoading(true);
+      
+      // 请求批量加载数据
+      fetchBatchBinsData({
+        priceType, 
+        priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
+        solPrice,
+        bins: [idx],
+        pageSize: curPageSizeNumber,
+        pageStart: batchStart,
+        pageEnd: batchEnd
+        // 注意：不需要额外的mode参数，api.js已经修复了验证逻辑
+      })
         .then(res => {
-          if (res && res[activeBin]) {
+          console.debug(`[DEBUG] 批量加载成功，返回数据:`, { idx, res });
+          
+          if (res[idx] && res[idx].pages) {
+            // 更新缓存数据
             setBinData(prev => {
-              const prevRows = prev[activeBin]?.data || [];
-              const startIdx = (targetPage - 1) * pagination.pageSize;
-              const newRows = res[activeBin].data || [];
-              // 合併新頁數據到正確位置
-              const mergedRows = [...prevRows];
-              for (let i = 0; i < newRows.length; i++) {
-                mergedRows[startIdx + i] = newRows[i];
-              }
-              const newLoadedPages = new Set(loadedPages);
-              newLoadedPages.add(targetPage);
+              const prevPages = prev[idx]?.pages || {};
+              const newPages = { ...prevPages };
+              
+              // 合并新数据
+              Object.keys(res[idx].pages).forEach(pageNum => {
+                const pageData = res[idx].pages[pageNum];
+                if (Array.isArray(pageData) && pageData.length > 0) {
+                  newPages[pageNum] = pageData;
+                  console.debug(`[DEBUG] 更新缓存数据，页码${pageNum}共${pageData.length}条记录`);
+                } else {
+                  console.warn(`[WARN] 返回数据中页码${pageNum}无记录`);
+                }
+              });
+              
               return {
                 ...prev,
-                [activeBin]: {
-                  data: mergedRows,
-                  total: res[activeBin].total,
-                  loadedPages: newLoadedPages
+                [idx]: {
+                  ...prev[idx],
+                  pages: newPages,
+                  total: res[idx].total || prev[idx]?.total || 0,
+                  summary: res[idx].summary || prev[idx]?.summary || {},
+                  // 更新缓存页码范围
+                  loadedPageRange: mergeRanges(
+                    (prev[idx]?.loadedPageRange || []).concat([[batchStart, batchEnd]])
+                  )
                 }
               };
             });
+          } else {
+            console.error('[ERROR] 批量加载失败，返回数据无效:', res);
+            message.error('批量加载失败');
           }
-        });
+        })
+        .catch(err => {
+          console.error('[ERROR] 批量加载失败，异常信息:', err);
+          message.error('批量加载失败');
+        })
+        .finally(() => setBinLoading(false));
     }
+    
+    // 更新当前页码和页大小
+    setPage(curPageNumber);
+    setPageSize(curPageSizeNumber);
   };
 
-  const handleReset = () => {
-    setMode('all');
-    fetchPageData(); // fetchPageData 已带当前 tab/bin/筛选条件
-  };
-
-  const controlSize = "middle";
-
-  // 随机抽样分页数据（slice 容错处理）
-  const pagedSampleData =
-    mode === 'sample' && Number.isInteger(samplePage) && Number.isInteger(samplePageSize) && samplePage > 0 && samplePageSize > 0
-      ? data.slice((samplePage - 1) * samplePageSize, samplePage * samplePageSize)
-      : [];
+  // 合并区间工具
+  function mergeRanges(ranges) {
+    if (ranges.length === 0) return [];
+    const sorted = ranges.slice().sort((a,b)=>a[0]-b[0]);
+    const merged = [sorted[0]];
+    for (let i=1;i<sorted.length;i++) {
+      const last = merged[merged.length-1];
+      if (sorted[i][0]<=last[1]+1) {
+        last[1] = Math.max(last[1], sorted[i][1]);
+      } else {
+        merged.push(sorted[i]);
+      }
+    }
+    return merged;
+  }
 
   // bins分頁數據
-  const pagedBinData =
-    binData[activeBin]?.data && Array.isArray(binData[activeBin].data)
-      ? binData[activeBin].data.slice((page - 1) * pageSize, page * pageSize)
-      : [];
+  const pagedBinData = binData[activeBin]?.pages?.[page] || [];
 
-  const binSummary = binData[activeBin]?.summary || null;
   const binTotal = binData[activeBin]?.total ?? 0;
+  const binSummary = binData[activeBin]?.summary || null;
 
   const getTablePagination = () => {
     // 随机抽样模式下启用分页（前端分页，数据不变）
@@ -289,7 +637,7 @@ function App() {
     setLoading(true);
     fetchFilterData({
       priceType,
-      priceUnit,
+      priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
       solPrice,
       token: selectedToken,
       page,
@@ -308,6 +656,58 @@ function App() {
         setSummary(null);
       })
       .finally(() => setLoading(false));
+  };
+
+  // 重置按钮逻辑（用于恢复全部数据/筛选等）
+  const handleReset = () => {
+    setMode('all');
+    fetchPageData(); // fetchPageData 已带当前 tab/bin/筛选条件
+  };
+
+  // Birdeye价格按钮点击
+  const handleCallBirdeye = async () => {
+    if (!data || data.length === 0) return;
+    setBirdeyeLoading(true);
+    setBirdeyeStatus('loading');
+    message.loading({ content: '开始调用 Birdeye API，请稍等', key: 'birdeye' });
+    try {
+      // 收集当前页的 token_mint_address 和 trade_time 字段
+      const trades = data.map(row => ({
+        token_mint_address: row.token_mint_address,
+        trade_time: row.trade_timestamp || row.trade_time_gmt8 || row.trade_time_gmt0 // 需为 unix timestamp
+      }));
+      // 处理 trade_time 字段为 int
+      trades.forEach(t => { t.trade_time = parseInt(t.trade_time, 10); });
+      const prices = await fetchBirdeyePrices(trades);
+      // 将价格插入 data
+      const newData = data.map((row, idx) => ({ ...row, birdeye_price: prices[idx] }));
+      // debug: 打印即将 setData 的内容
+      console.log('即将 setData 的 newData:', newData.map(r => ({
+        buy_price_usd: r.buy_price_usd,
+        sell_price_usd: r.sell_price_usd,
+        buy_price: r.buy_price,
+        sell_price: r.sell_price,
+        birdeye_price: r.birdeye_price,
+        token_mint_address: r.token_mint_address,
+        trade_time: r.trade_timestamp || r.trade_time_gmt8 || r.trade_time_gmt0
+      })));
+      setData(newData);
+      setBirdeyeStatus('success');
+      message.success({ content: 'Birdeye API 回传结果完成', key: 'birdeye' });
+    } catch (e) {
+      setBirdeyeStatus('error');
+      message.error({ content: `数据获取失败：${e.message || e}`, key: 'birdeye' });
+    } finally {
+      setBirdeyeLoading(false);
+    }
+  };
+
+  // 切换单位时只切换前端展示字段，不重新请求后端数据
+  const handlePriceUnitChange = (val) => {
+    setPriceUnit(val);
+    // 不重新请求，只切换显示字段
+    setBinData(prev => ({ ...prev }));
+    setSummary(prev => prev ? { ...prev } : prev);
   };
 
   // DEBUG: 翻頁及數據變動時打印狀態
@@ -330,21 +730,6 @@ function App() {
       sampleFirstIn.current = true;
     }
   }, [mode]);
-
-  const handlePriceUnitChange = (val) => {
-    setPriceUnit(val);
-    if (mode === 'sample') {
-      // 僅本地轉換，不重新請求
-      setData(prev => prev.map(row => ({ ...row })));
-      setSummary(prev => {
-        if (!prev) return prev;
-        return { ...prev };
-      });
-      return;
-    }
-    // 非 sample mode，才重新請求
-    fetchPageData({ priceUnit: val });
-  };
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -445,6 +830,11 @@ function App() {
                   abnormalMode={abnormalMode}
                   onClick={handleAbnormalFilter}
                 />
+              </Col>
+              <Col>
+                <Button onClick={handleCallBirdeye} loading={birdeyeLoading} disabled={!data || data.length === 0} size={controlSize}>
+                  Call BirdEye
+                </Button>
               </Col>
               <Col>
                 <Button onClick={handleReset} size={controlSize}>重置</Button>
