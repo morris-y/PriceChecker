@@ -138,3 +138,11 @@ export const fetchBirdeyePrices = async (trades) => {
   const res = await axios.post(`${API_BASE}/birdeye_prices`, trades);
   return res.data.prices;
 };
+
+// 获取Solana slot timestamp (单个或批量)
+export const fetchSlotTimestamps = async (slots) => {
+  // slots: [slot1, slot2, ...]
+  // 返回: { slot: timestamp, ... }
+  const res = await axios.post(`${API_BASE}/slot_timestamps`, { slots });
+  return res.data.timestamps;
+};

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi import Request
 import datetime
 from birdeye_api import batch_birdeye_prices
+from solana_api import get_slot_timestamps
 
 # 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -588,4 +589,20 @@ def birdeye_prices(trades: List[dict]):
         return {"prices": prices}
     except Exception as e:
         logger.error(f"/api/birdeye_prices error: {e}", exc_info=True)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.post("/api/slot_timestamps")
+def slot_timestamps_api(req: dict):
+    """
+    批量获取Solana slot的区块时间戳。POST: {slots: [slot1, slot2, ...]}
+    返回: {timestamps: {slot: timestamp, ...}}
+    """
+    try:
+        slots = req.get("slots", [])
+        if not isinstance(slots, list):
+            return JSONResponse(content={"error": "slots参数必须为列表"}, status_code=400)
+        timestamps = get_slot_timestamps(slots)
+        return {"timestamps": timestamps}
+    except Exception as e:
+        logger.error(f"/api/slot_timestamps error: {e}", exc_info=True)
         return JSONResponse(content={"error": str(e)}, status_code=500)

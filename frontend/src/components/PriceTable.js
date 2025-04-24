@@ -1,5 +1,9 @@
 import React from "react";
-import { Table, Tooltip, Descriptions } from "antd";
+import { Table, Tooltip, Descriptions, Button, Spin } from "antd";
+import { fetchSlotTimestamps } from "../api";
+import dayjs from "dayjs";
+import utc from 'dayjs/plugin/utc';
+dayjs.extend(utc);
 
 function formatNumber(val, digits = 8) {
   if (val === undefined || val === null || val === "") return "-";
@@ -12,7 +16,34 @@ function formatNumber(val, digits = 8) {
   return num.toLocaleString(undefined, { maximumFractionDigits: safeDigits });
 }
 
-const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pagination, summary, priceType }) => {
+function formatSlotTime(ts, timezone) {
+  if (!ts) return "-";
+  // 保证 ts 是数字
+  const tsNum = Number(ts);
+  if (isNaN(tsNum)) return "-";
+  // 用 dayjs.utc 保证基础时间是 UTC
+  const d = dayjs.unix(tsNum).utc();
+  if (timezone === "gmt8") {
+    return d.add(8, 'hour').format("YYYY-MM-DD HH:mm:ss");
+  } else {
+    return d.format("YYYY-MM-DD HH:mm:ss");
+  }
+}
+
+const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summary, priceType, slotTimes = {}, slotLoading = false, showArbCols = false }) => {
+  const [slotError, setSlotError] = React.useState(null);
+
+  // 触发获取slot timestamp
+  const handleGetSlotTime = async () => {
+    try {
+      const slots = data.map(row => row.transaction_slot).filter(Boolean);
+      const res = await fetchSlotTimestamps(slots);
+      // slotTimes 由 props 传入，不再更新本地状态
+    } catch (e) {
+      setSlotError("获取slot timestamp失败");
+    }
+  };
+
   const columns = [
     {
       title: "Solscan",
@@ -40,9 +71,9 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
       dataIndex: "gmgn_link",
       key: "gmgn_link",
       render: (text, record) => (
-        <a href={text} target="_blank" rel="noopener noreferrer">
-          {showFullToken ? record.token_mint_address : record.token_mint_address?.slice(0, 4)}
-        </a>
+        <Tooltip title={record.token_mint_address}>
+          <a href={text} target="_blank" rel="noopener noreferrer">{record.token_mint_address?.slice(0, 4)}</a>
+        </Tooltip>
       ),
       width: 120,
     },
@@ -136,31 +167,32 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
       },
       sorter: (a, b) => Number((priceUnit === 'USD' ? a.sell_price_usd : a.sell_price) || 0) - Number((priceUnit === 'USD' ? b.sell_price_usd : b.sell_price) || 0),
     },
-    {
-      title: "套利盈亏",
-      dataIndex: "arbitrage_profit_loss",
-      key: "arbitrage_profit_loss",
-      align: 'right',
-      render: formatNumber,
-      sorter: (a, b) => Number(a.arbitrage_profit_loss) - Number(b.arbitrage_profit_loss),
-    },
-    {
-      title: "套利价格变化",
-      dataIndex: "arbitrage_price_change",
-      key: "arbitrage_price_change",
-      align: 'right',
-      render: formatNumber,
-      sorter: (a, b) => Number(a.arbitrage_price_change) - Number(b.arbitrage_price_change),
-    },
-    {
-      title: "套利交易量",
-      dataIndex: "arbitrage_volume",
-      key: "arbitrage_volume",
-      align: 'right',
-      render: formatNumber,
-      sorter: (a, b) => Number(a.arbitrage_volume) - Number(b.arbitrage_volume),
-    },
   ];
+
+  // 找到交易时间栏位索引
+  const tradeTimeIdx = columns.findIndex(col => col.key === "trade_time");
+  // 构造 Slot时间栏位
+  const slotTimeColumn = {
+    title: "Slot时间",
+    dataIndex: "transaction_slot",
+    key: "slot_timestamp",
+    align: 'right',
+    width: 160, // 与交易时间栏位统一
+    render: (slot, record) => {
+      if (!slot) return "-";
+      if (slotLoading) return <Spin size="small" />;
+      const ts = slotTimes && slotTimes[slot];
+      // 注意：ts 可能为 0 或 undefined/null
+      if (ts === undefined || ts === null) return "-";
+      return formatSlotTime(ts, timezone);
+    },
+  };
+  // 插入到交易时间栏位右边
+  if (tradeTimeIdx !== -1) {
+    columns.splice(tradeTimeIdx + 1, 0, slotTimeColumn);
+  } else {
+    columns.push(slotTimeColumn);
+  }
 
   // 动态插入 Birdeye 价格列
   if (columns.every(col => col.key !== 'birdeye_price')) {
@@ -197,6 +229,39 @@ const PriceTable = ({ data = [], loading, timezone, showFullToken, priceUnit, pa
         return <span style={{color: diff > 0 ? '#3f8600' : diff < 0 ? '#cf1322' : undefined}}>{diffStr}</span>;
       },
     });
+  }
+
+  // 动态插入套利相关栏位
+  if (showArbCols) {
+    columns.push(
+      {
+        title: "套利盈亏",
+        dataIndex: "arbitrage_profit_loss",
+        key: "arbitrage_profit_loss",
+        align: 'right',
+        render: formatNumber,
+        sorter: (a, b) => Number(a.arbitrage_profit_loss) - Number(b.arbitrage_profit_loss),
+        width: 90,
+      },
+      {
+        title: "套利价格变化",
+        dataIndex: "arbitrage_price_change",
+        key: "arbitrage_price_change",
+        align: 'right',
+        render: formatNumber,
+        sorter: (a, b) => Number(a.arbitrage_price_change) - Number(b.arbitrage_price_change),
+        width: 110,
+      },
+      {
+        title: "套利交易量",
+        dataIndex: "arbitrage_volume",
+        key: "arbitrage_volume",
+        align: 'right',
+        render: formatNumber,
+        sorter: (a, b) => Number(a.arbitrage_volume) - Number(b.arbitrage_volume),
+        width: 100,
+      }
+    );
   }
 
   const enhancedData = (Array.isArray(data) ? data : []).map(row => ({

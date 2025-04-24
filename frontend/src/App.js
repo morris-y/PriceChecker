@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Layout, InputNumber, Button, Row, Col, Typography, message, Select, Spin, Tabs } from "antd";
 import PriceTable from "./components/PriceTable";
-import AbnormalFilterButton from "./components/AbnormalFilterButton";
-import { fetchRandomSample, fetchTopTokens, fetchBatchBinsData, fetchFilterData, fetchBirdeyePrices } from "./api";
+import { fetchRandomSample, fetchTopTokens, fetchBatchBinsData, fetchFilterData, fetchBirdeyePrices, fetchSlotTimestamps } from "./api";
+import dayjs from "dayjs";
 
 const { Header, Content } = Layout;
 const { Title } = Typography;
@@ -20,7 +20,6 @@ function App() {
   const [priceType, setPriceType] = useState("buy_price");
   const [priceUnit, setPriceUnit] = useState("USD"); 
   const [timezone, setTimezone] = useState("gmt8");
-  const [showFullToken, setShowFullToken] = useState(false);
   const [solPrice, setSolPrice] = useState(133); 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -29,9 +28,12 @@ function App() {
   const [summary, setSummary] = useState(null);
   const [samplePage, setSamplePage] = useState(1);
   const [samplePageSize, setSamplePageSize] = useState(20);
-  const [abnormalMode, setAbnormalMode] = useState(false); // 新增异常模式
   const [birdeyeLoading, setBirdeyeLoading] = useState(false);
   const [birdeyeStatus, setBirdeyeStatus] = useState(null); // 'loading' | 'success' | 'error'
+  const [slotTimes, setSlotTimes] = useState({}); // 当前页slot->timestamp
+  const [slotLoading, setSlotLoading] = useState(false);
+  const [slotError, setSlotError] = useState(null);
+  const [showArbCols, setShowArbCols] = useState(false); // 默认隐藏
 
   // 控件尺寸（用于 antd 组件）
   const controlSize = "middle";
@@ -186,7 +188,19 @@ function App() {
           console.debug(`[DEBUG] 区间${binIdxNumber}的${startPageNumber}-${endPageNumber}页加载成功`);
           setBinData(prev => {
             const prevPages = prev[binIdxNumber]?.pages || {};
-            const newPages = { ...prevPages, ...res[binIdxNumber].pages };
+            const newPages = { ...prevPages };
+            
+            // 合并新数据
+            Object.keys(res[binIdxNumber].pages).forEach(pageNum => {
+              const pageData = res[binIdxNumber].pages[pageNum];
+              if (Array.isArray(pageData) && pageData.length > 0) {
+                newPages[pageNum] = pageData;
+                console.debug(`[DEBUG] 更新缓存数据，页码${pageNum}共${pageData.length}条记录`);
+              } else {
+                console.warn(`[WARN] 返回数据中页码${pageNum}无记录`);
+              }
+            });
+            
             return {
               ...prev,
               [binIdxNumber]: {
@@ -194,7 +208,10 @@ function App() {
                 pages: newPages,
                 total: res[binIdxNumber].total,
                 summary: res[binIdxNumber].summary,
-                loadedPageRange: mergeRanges((prev[binIdxNumber]?.loadedPageRange || []).concat([[startPageNumber, endPageNumber]]))
+                // 更新缓存页码范围
+                loadedPageRange: mergeRanges(
+                  (prev[binIdxNumber]?.loadedPageRange || []).concat([[startPageNumber, endPageNumber]])
+                )
               }
             };
           });
@@ -307,38 +324,6 @@ function App() {
       fetchPageData({ page: 1 });
     }
   }, [selectedToken, priceType, solPrice, mode]);
-
-  // 异常值过滤切换
-  const handleAbnormalFilter = () => {
-    if (!abnormalMode) {
-      setLoading(true);
-      fetchFilterData({
-        priceType,
-        priceUnit: 'USD', // 确保所有价格区间（bins/tab）始终以USD为主锚定
-        solPrice,
-        token: selectedToken,
-        page,
-        pageSize,
-        abnormal_only: true
-      })
-        .then(res => {
-          setData(res.data || []);
-          setTotal(res.total || 0);
-          setSummary(res.summary || null);
-          setMode('all');
-          setAbnormalMode(true);
-        })
-        .catch(err => {
-          message.error('获取异常数据失败');
-          setData([]);
-          setSummary(null);
-        })
-        .finally(() => setLoading(false));
-    } else {
-      setAbnormalMode(false);
-      fetchPageData(); // 恢复全量
-    }
-  };
 
   const handleSampleTableChange = (pagination) => {
     setSamplePage(pagination.current);
@@ -612,17 +597,6 @@ function App() {
       };
     }
     // 全量分页模式下正常分页
-    if (abnormalMode) {
-      return {
-        current: page,
-        pageSize,
-        total,
-        showTotal: (total) => `共 ${total} 条`,
-        showSizeChanger: true,
-        onChange: handleTableChange,
-      };
-    }
-    // bins分頁
     return {
       current: page,
       pageSize,
@@ -702,6 +676,26 @@ function App() {
     }
   };
 
+  // 触发获取slot timestamp
+  const handleGetSlotTime = async () => {
+    setSlotLoading(true);
+    setSlotError(null);
+    try {
+      const slots = data.map(row => row.transaction_slot).filter(Boolean);
+      const res = await fetchSlotTimestamps(slots);
+      // 归一化slotTimes的key为字符串，确保与row.transaction_slot查找一致
+      const normalized = {};
+      Object.keys(res || {}).forEach(slot => {
+        normalized[String(slot)] = res[slot];
+      });
+      setSlotTimes(normalized);
+    } catch (e) {
+      setSlotError("获取slot timestamp失败");
+    } finally {
+      setSlotLoading(false);
+    }
+  };
+
   // 切换单位时只切换前端展示字段，不重新请求后端数据
   const handlePriceUnitChange = (val) => {
     setPriceUnit(val);
@@ -731,6 +725,28 @@ function App() {
     }
   }, [mode]);
 
+  useEffect(() => {
+    setSlotTimes({});
+    setSlotLoading(false);
+    setSlotError(null);
+  }, [data]);
+
+  useEffect(() => {
+    // 当时区变化时，不需要重新请求 slotTimes 数据
+    // 但需要触发 PriceTable 重新渲染来应用新时区
+    if (Object.keys(slotTimes).length > 0) {
+      // 轻微修改 slotTimes 对象触发重新渲染
+      setSlotTimes(prev => ({...prev}));
+    }
+  }, [timezone]); // 添加 timezone 依赖
+
+  const navDropdown = (
+    <Select value={showArbCols ? 'show' : 'hide'} size="middle" style={{ width: 120, marginRight: 12, display: 'flex', alignItems: 'center' }} onChange={val => setShowArbCols(val === 'show')}>
+      <Select.Option value="hide">隐藏套利</Select.Option>
+      <Select.Option value="show">显示套利</Select.Option>
+    </Select>
+  );
+
   return (
     <Layout style={{ minHeight: "100vh" }}>
       <Header style={{ background: "#fff", padding: "10px 24px 10px 24px", height: 'auto', display: 'flex', alignItems: 'center' }}>
@@ -741,7 +757,7 @@ function App() {
           <Col flex="auto">
             <Row gutter={[8, 8]} align="middle" justify="end" wrap style={{ height: '100%' }}>
               <Col>
-                <Spin spinning={tokenLoading} size={controlSize}>
+                <Spin spinning={tokenLoading} size="middle">
                   <Select
                     allowClear
                     showSearch
@@ -753,7 +769,7 @@ function App() {
                     filterOption={(input, option) =>
                       (option?.children ?? '').toLowerCase().includes(input.toLowerCase())
                     }
-                    size={controlSize}
+                    size="middle"
                   >
                     {topTokens.map(t => (
                       <Option key={t.token_mint_address} value={t.token_mint_address}>
@@ -768,7 +784,7 @@ function App() {
                   value={priceType}
                   onChange={setPriceType}
                   style={{ minWidth: 70 }}
-                  size={controlSize}
+                  size="middle"
                 >
                   <Option value="buy_price">买价</Option>
                   <Option value="sell_price">卖价</Option>
@@ -776,22 +792,22 @@ function App() {
               </Col>
               <Col>
                 <span style={{ marginRight: 4 }}>Rows</span>
-                <InputNumber min={1} max={10000} value={rows} onChange={setRows} style={{ width: 90 }} size={controlSize} />
+                <InputNumber min={1} max={10000} value={rows} onChange={setRows} style={{ width: 90 }} size="middle" />
               </Col>
               <Col>
                 <span style={{ marginRight: 4 }}>Tokens</span>
-                <InputNumber min={1} max={1000} value={tokens} onChange={setTokens} style={{ width: 90 }} size={controlSize} />
+                <InputNumber min={1} max={1000} value={tokens} onChange={setTokens} style={{ width: 90 }} size="middle" />
               </Col>
               <Col>
                 <span style={{ marginRight: 4 }}>SOL/USD</span>
-                <InputNumber min={1} max={10000} value={solPrice} onChange={setSolPrice} style={{ width: 100 }} size={controlSize} />
+                <InputNumber min={1} max={10000} value={solPrice} onChange={setSolPrice} style={{ width: 100 }} size="middle" />
               </Col>
               <Col>
                 <Select
                   value={priceUnit}
                   onChange={handlePriceUnitChange}
                   style={{ minWidth: 70 }}
-                  size={controlSize}
+                  size="middle"
                 >
                   <Option value="SOL">SOL</Option>
                   <Option value="USD">USD</Option>
@@ -802,42 +818,43 @@ function App() {
                   value={timezone}
                   onChange={setTimezone}
                   style={{ minWidth: 80 }}
-                  size={controlSize}
+                  size="middle"
                 >
                   <Option value="gmt0">GMT+0</Option>
                   <Option value="gmt8">GMT+8</Option>
                 </Select>
               </Col>
               <Col>
-                <Select
-                  value={showFullToken}
-                  onChange={setShowFullToken}
-                  style={{ minWidth: 90 }}
-                  size={controlSize}
+                <Button type="primary" onClick={handleQuery} loading={loading} size="middle">
+                  抽样
+                </Button>
+              </Col>
+              <Col>
+                <Button 
+                  type="primary"
+                  onClick={handleCallBirdeye} 
+                  loading={birdeyeLoading} 
+                  size="middle"
                 >
-                  <Option value={false}>Token缩略</Option>
-                  <Option value={true}>Token全显</Option>
-                </Select>
-              </Col>
-              <Col>
-                <Button type="primary" onClick={handleQuery} loading={loading} size={controlSize}>
-                  查询
+                  Call Birdeye
                 </Button>
               </Col>
               <Col>
-                <AbnormalFilterButton
-                  loading={loading}
-                  abnormalMode={abnormalMode}
-                  onClick={handleAbnormalFilter}
-                />
-              </Col>
-              <Col>
-                <Button onClick={handleCallBirdeye} loading={birdeyeLoading} disabled={!data || data.length === 0} size={controlSize}>
-                  Call BirdEye
+                <Button 
+                  type="primary"
+                  onClick={handleGetSlotTime} 
+                  loading={slotLoading} 
+                  size="middle"
+                >
+                  getSlotTime
                 </Button>
+                {slotError && <span style={{ color: 'red', marginLeft: 8 }}>{slotError}</span>}
               </Col>
               <Col>
-                <Button onClick={handleReset} size={controlSize}>重置</Button>
+                <Button onClick={handleReset} size="middle">重置</Button>
+              </Col>
+              <Col>
+                {navDropdown}
               </Col>
             </Row>
           </Col>
@@ -853,14 +870,16 @@ function App() {
           }))}
         />
         <PriceTable
-          data={mode === 'sample' ? data : abnormalMode ? data : pagedBinData}
-          summary={mode === 'sample' ? summary : abnormalMode ? summary : binSummary}
+          data={mode === 'sample' ? data : pagedBinData}
+          summary={mode === 'sample' ? summary : binSummary}
           loading={loading || binLoading}
           timezone={timezone}
-          showFullToken={showFullToken}
           priceUnit={priceUnit}
           pagination={getTablePagination()}
           rowKey={row => row.transaction_signature || row.id || row.key || row.token_mint_address || row.index}
+          slotTimes={slotTimes}
+          slotLoading={slotLoading}
+          showArbCols={showArbCols}
         />
       </Content>
     </Layout>
