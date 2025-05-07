@@ -95,12 +95,12 @@ const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summa
     },
     {
       title: `买入价格(${priceUnit})`,
-      dataIndex: priceUnit === 'USD' ? 'buy_price_usd' : 'buy_price',
+      dataIndex: priceUnit === 'USD' ? 'buy_price_usd' : 'buy_price_sol',
       key: "buy_price",
       align: 'right',
       render: (text, record) => {
         const usd = record.buy_price_usd;
-        const sol = record.buy_price;
+        const sol = record.buy_price_sol;
         let mainVal, hoverVal, hoverUnit;
         if (priceUnit === 'USD') {
           mainVal = usd;
@@ -120,7 +120,7 @@ const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summa
           </Tooltip>
         );
       },
-      sorter: (a, b) => Number((priceUnit === 'USD' ? a.buy_price_usd : a.buy_price) || 0) - Number((priceUnit === 'USD' ? b.buy_price_usd : b.buy_price) || 0),
+      sorter: (a, b) => Number((priceUnit === 'USD' ? a.buy_price_usd : a.buy_price_sol) || 0) - Number((priceUnit === 'USD' ? b.buy_price_usd : b.buy_price_sol) || 0),
     },
     {
       title: "卖出数量",
@@ -140,12 +140,12 @@ const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summa
     },
     {
       title: `卖出价格(${priceUnit})`,
-      dataIndex: priceUnit === 'USD' ? 'sell_price_usd' : 'sell_price',
+      dataIndex: priceUnit === 'USD' ? 'sell_price_usd' : 'sell_price_sol',
       key: "sell_price",
       align: 'right',
       render: (text, record) => {
         const usd = record.sell_price_usd;
-        const sol = record.sell_price;
+        const sol = record.sell_price_sol;
         let mainVal, hoverVal, hoverUnit;
         if (priceUnit === 'USD') {
           mainVal = usd;
@@ -165,7 +165,7 @@ const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summa
           </Tooltip>
         );
       },
-      sorter: (a, b) => Number((priceUnit === 'USD' ? a.sell_price_usd : a.sell_price) || 0) - Number((priceUnit === 'USD' ? b.sell_price_usd : b.sell_price) || 0),
+      sorter: (a, b) => Number((priceUnit === 'USD' ? a.sell_price_usd : a.sell_price_sol) || 0) - Number((priceUnit === 'USD' ? b.sell_price_usd : b.sell_price_sol) || 0),
     },
   ];
 
@@ -220,7 +220,9 @@ const PriceTable = ({ data = [], loading, timezone, priceUnit, pagination, summa
         ) {
           return '-';
         }
-        const numBirdeye = Number(birdeye);
+        // 修正：强制只取birdeye中的第一个数字，去掉换行和多余字符
+        const birdeyeClean = String(birdeye).split(/[\s\n]/)[0].replace(/[^0-9.\-eE]/g, '');
+        const numBirdeye = Number(birdeyeClean);
         const numPrice = Number(price);
         if (isNaN(numBirdeye) || isNaN(numPrice) || numBirdeye === 0) return '-';
         const diff = ((numPrice - numBirdeye) / numBirdeye) * 100;

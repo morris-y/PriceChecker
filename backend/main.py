@@ -89,7 +89,7 @@ def random_sample(
         # 構建 where 條件
         where_clauses = []
         if price_type:
-            where_clauses.append(f"{price_type} IS NOT NULL")
+            where_clauses.append(f"{price_type}_sol IS NOT NULL")
         if token_list:
             token_items = [f"'{x.strip()}'" for x in token_list.split(",") if x.strip()]
             if token_items:
@@ -99,7 +99,7 @@ def random_sample(
             low = bins[price_bin]
             high = bins[price_bin+1] if price_bin+1 < len(bins) else 1e20
             if price_type:
-                price_col = price_type if price_unit == 'SOL' else f"{price_type}*{sol_price}"
+                price_col = price_type if price_unit == 'SOL' else f"{price_type}_sol*{sol_price}"
                 where_clauses.append(f"{price_col} >= {low}")
                 if high != 1e20:
                     where_clauses.append(f"{price_col} < {high}")
@@ -123,7 +123,7 @@ def random_sample(
         if price_type and not df.empty:
             # 新增：同時計算 SOL 和 USD 統計
             if price_type in ['buy_price', 'sell_price']:
-                sol_col = price_type
+                sol_col = f"{price_type}_sol"
                 usd_col = f"{price_type}_usd"
                 # 補全 usd 欄位
                 if usd_col not in df.columns:
@@ -169,14 +169,14 @@ def random_sample(
             row["solscan_link"] = f"https://solscan.io/tx/{row.get('transaction_signature','')}" if row.get("transaction_signature") else ""
             row["gmgn_link"] = f"https://www.gmgn.ai/sol/token/{row.get('token_mint_address','')}" if row.get("token_mint_address") else ""
             # 保證 buy_price_usd/sell_price_usd 欄位補全
-            if "buy_price" in row and "buy_price_usd" not in row:
+            if "buy_price_sol" in row and "buy_price_usd" not in row:
                 try:
-                    row["buy_price_usd"] = float(row["buy_price"]) * float(sol_price) if row["buy_price"] not in [None, '', 'nan'] else None
+                    row["buy_price_usd"] = float(row["buy_price_sol"]) * float(sol_price) if row["buy_price_sol"] not in [None, '', 'nan'] else None
                 except Exception:
                     row["buy_price_usd"] = None
-            if "sell_price" in row and "sell_price_usd" not in row:
+            if "sell_price_sol" in row and "sell_price_usd" not in row:
                 try:
-                    row["sell_price_usd"] = float(row["sell_price"]) * float(sol_price) if row["sell_price"] not in [None, '', 'nan'] else None
+                    row["sell_price_usd"] = float(row["sell_price_sol"]) * float(sol_price) if row["sell_price_sol"] not in [None, '', 'nan'] else None
                 except Exception:
                     row["sell_price_usd"] = None
             return row
@@ -238,14 +238,14 @@ def price_ranges(
         if cached:
             return {"data": cached}
         con = duckdb.connect()
-        query = f"SELECT {price_type} FROM read_csv_auto('{CSV_PATH}') WHERE {price_type} IS NOT NULL AND {price_type} > 0"
+        query = f"SELECT {price_type}_sol FROM read_csv_auto('{CSV_PATH}') WHERE {price_type}_sol IS NOT NULL AND {price_type}_sol > 0"
         df = con.execute(query).df()
-        prices = df[price_type].sort_values().to_list()
+        prices = df[price_type + "_sol"].sort_values().to_list()
         n = len(prices)
         if price_unit == "SOL":
-            prices_usd = [p * sol_price for p in prices]
-        else:
             prices_usd = prices
+        else:
+            prices_usd = [p * sol_price for p in prices]
         total = len(prices_usd)
         bin_ranges = []
         for i in range(len(bins)):
@@ -301,10 +301,15 @@ def query_and_enrich(
     # 處理 price_col 與 where 條件
     def col_expr(col):
         if col == 'buy_price_usd':
-            return f"buy_price*{sol_price}"
+            return f"buy_price_sol*{sol_price}"
         elif col == 'sell_price_usd':
-            return f"sell_price*{sol_price}"
+            return f"sell_price_sol*{sol_price}"
         else:
+            # 兼容旧逻辑，buy_price/sell_price直接映射为buy_price_sol/sell_price_sol
+            if col == 'buy_price':
+                return 'buy_price_sol'
+            elif col == 'sell_price':
+                return 'sell_price_sol'
             return col
     where_clauses = []
     if token_list:
@@ -312,13 +317,19 @@ def query_and_enrich(
         tokens_str = ",".join(tokens)
         where_clauses.append(f"token_mint_address IN ({tokens_str})")
     if buy_price_filter == 'gt0':
-        where_clauses.append("buy_price > 0")
+        where_clauses.append("buy_price_sol > 0")
     elif buy_price_filter == 'eq0':
-        where_clauses.append("buy_price = 0")
+        where_clauses.append("buy_price_sol = 0")
     if abnormal_only:
         where_clauses.append(abnormal_condition)
     if price_unit == "SOL":
-        price_col = price_type
+        # 兼容前端传buy_price/sell_price
+        if price_type == 'buy_price':
+            price_col = 'buy_price_sol'
+        elif price_type == 'sell_price':
+            price_col = 'sell_price_sol'
+        else:
+            price_col = price_type
     else:
         price_col = price_type + "_usd"
     # bins 過濾
@@ -333,7 +344,7 @@ def query_and_enrich(
     if return_detail:
         # 只查當頁資料
         select_cols = "*"
-        select_expr = f"{select_cols}, buy_price*{sol_price} AS buy_price_usd, sell_price*{sol_price} AS sell_price_usd"
+        select_expr = f"{select_cols}, buy_price_sol, sell_price_sol, buy_price_sol*{sol_price} AS buy_price_usd, sell_price_sol*{sol_price} AS sell_price_usd"
         sql = f"SELECT {select_expr} FROM read_parquet('{PARQUET_PATH}') WHERE {where_sql} LIMIT {page_size} OFFSET {(page-1)*page_size}"
         df = con.execute(sql).df()
         # 統計總數
@@ -368,7 +379,7 @@ def query_and_enrich(
     else:
         # 只做統計（同時計算 SOL 和 USD 統計）
         if price_type in ['buy_price', 'sell_price']:
-            sol_col = price_type
+            sol_col = 'buy_price_sol' if price_type == 'buy_price' else 'sell_price_sol'
             usd_col = f"{price_type}_usd"
             # 補全 usd 欄位
             try:
@@ -423,7 +434,7 @@ def filter_data(
     try:
         bins = [0, 10, 100, 1000, 10000, 100000, 1e20]
         # 新增異常值過濾條件
-        abnormal_condition = "((type = 'buy_token' AND (buy_price IS NULL OR buy_price = 0 OR isnan(buy_price))) OR (type = 'sell_token' AND (sell_price IS NULL OR sell_price = 0 OR isnan(sell_price))))"
+        abnormal_condition = "((type = 'buy_token' AND (buy_price_sol IS NULL OR buy_price_sol = 0 OR isnan(buy_price_sol))) OR (type = 'sell_token' AND (sell_price_sol IS NULL OR sell_price_sol = 0 OR isnan(sell_price_sol))))"
         # 查詢明細
         data, total = query_and_enrich(
             price_type=price_type,
